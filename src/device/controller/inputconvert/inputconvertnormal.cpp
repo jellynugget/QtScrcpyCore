@@ -4,7 +4,12 @@
 #include "inputconvertnormal.h"
 #include "controller.h"
 
-InputConvertNormal::InputConvertNormal(Controller *controller) : InputConvertBase(controller) {}
+InputConvertNormal::InputConvertNormal(Controller *controller) : InputConvertBase(controller)
+{
+    m_vfingerDown = false;
+    m_vfingerInvertX = false;
+    m_vfingerInvertY = false;
+}
 
 InputConvertNormal::~InputConvertNormal() {}
 
@@ -44,7 +49,21 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
     pos.setX(pos.x() * frameSize.width() / showSize.width());
     pos.setY(pos.y() * frameSize.height() / showSize.height());
 
-    // set data
+    // Check for pinch-to-zoom mode (Ctrl+click)
+    bool ctrl_pressed = from->modifiers() & Qt::ControlModifier;
+    bool shift_pressed = from->modifiers() & Qt::ShiftModifier;
+    bool isLeftButton = (from->type() == QEvent::MouseButtonPress && from->button() == Qt::LeftButton) ||
+                        (from->type() == QEvent::MouseButtonRelease && from->button() == Qt::LeftButton) ||
+                        (from->type() == QEvent::MouseMove && (from->buttons() & Qt::LeftButton));
+    bool down = (action == AMOTION_EVENT_ACTION_DOWN);
+    bool up = (action == AMOTION_EVENT_ACTION_UP);
+    
+    // Determine if we should change virtual finger state
+    bool change_vfinger = isLeftButton && 
+                         ((down && !m_vfingerDown && (ctrl_pressed || shift_pressed)) ||
+                          (up && m_vfingerDown));
+
+    // set data for the main touch event
     ControlMsg *controlMsg = new ControlMsg(ControlMsg::CMT_INJECT_TOUCH);
     if (!controlMsg) {
         return;
@@ -57,6 +76,28 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
         QRect(pos.toPoint(), frameSize),
         AMOTION_EVENT_ACTION_DOWN == action ? 1.0f : 0.0f);
     sendControlMsg(controlMsg);
+
+    // Handle pinch-to-zoom virtual finger
+    if (change_vfinger) {
+        if (down) {
+            // Ctrl  Shift     invert_x  invert_y
+            // ----  ----- ==> --------  --------
+            //   0     0           0         0      -
+            //   0     1           1         0      vertical tilt
+            //   1     0           1         1      rotate (pinch-to-zoom)
+            //   1     1           0         1      horizontal tilt
+            m_vfingerInvertX = ctrl_pressed ^ shift_pressed;
+            m_vfingerInvertY = ctrl_pressed;
+        }
+        QPointF vfinger = inversePoint(pos, frameSize, m_vfingerInvertX, m_vfingerInvertY);
+        AndroidMotioneventAction vfingerAction = down ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+        simulateVirtualFinger(vfingerAction, vfinger, frameSize);
+        m_vfingerDown = down;
+    } else if (m_vfingerDown && action == AMOTION_EVENT_ACTION_MOVE) {
+        // Update virtual finger position on move
+        QPointF vfinger = inversePoint(pos, frameSize, m_vfingerInvertX, m_vfingerInvertY);
+        simulateVirtualFinger(AMOTION_EVENT_ACTION_MOVE, vfinger, frameSize);
+    }
 }
 
 void InputConvertNormal::wheelEvent(const QWheelEvent *from, const QSize &frameSize, const QSize &showSize)
@@ -451,4 +492,34 @@ AndroidMetastate InputConvertNormal::convertMetastate(Qt::KeyboardModifiers modi
     }
     */
     return static_cast<AndroidMetastate>(metastate);
+}
+
+void InputConvertNormal::simulateVirtualFinger(AndroidMotioneventAction action, const QPointF &point, const QSize &frameSize)
+{
+    bool up = (action == AMOTION_EVENT_ACTION_UP);
+    
+    ControlMsg *controlMsg = new ControlMsg(ControlMsg::CMT_INJECT_TOUCH);
+    if (!controlMsg) {
+        return;
+    }
+    controlMsg->setInjectTouchMsgData(
+        static_cast<quint64>(POINTER_ID_VIRTUAL_FINGER),
+        action,
+        static_cast<AndroidMotioneventButtons>(0),
+        static_cast<AndroidMotioneventButtons>(0),
+        QRect(point.toPoint(), frameSize),
+        up ? 0.0f : 1.0f);
+    sendControlMsg(controlMsg);
+}
+
+QPointF InputConvertNormal::inversePoint(const QPointF &point, const QSize &frameSize, bool invertX, bool invertY)
+{
+    QPointF result = point;
+    if (invertX) {
+        result.setX(frameSize.width() - point.x());
+    }
+    if (invertY) {
+        result.setY(frameSize.height() - point.y());
+    }
+    return result;
 }

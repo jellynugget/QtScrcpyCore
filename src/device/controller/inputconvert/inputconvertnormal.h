@@ -19,6 +19,14 @@ private:
     AndroidMotioneventButtons convertMouseButton(Qt::MouseButton button);
     AndroidKeycode convertKeyCode(int key, Qt::KeyboardModifiers modifiers);
     AndroidMetastate convertMetastate(Qt::KeyboardModifiers modifiers);
+    
+    // Pinch-to-zoom support
+    void simulateVirtualFinger(AndroidMotioneventAction action, const QPointF &point, const QSize &frameSize);
+    QPointF inversePoint(const QPointF &point, const QSize &frameSize, bool invertX, bool invertY);
+    
+    bool m_vfingerDown = false;
+    bool m_vfingerInvertX = false;
+    bool m_vfingerInvertY = false;
 };
 
 #endif // INPUTCONVERT_H
