@@ -158,95 +158,61 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
             //   0     1           1         0      vertical tilt
             //   1     0           1         1      rotate (pinch-to-zoom)
             //   1     1           0         1      horizontal tilt
-            m_vfingerInvertX = ctrl_pressed ^ shift_pressed;
-            m_vfingerInvertY = ctrl_pressed;
+            // Always use vertical placement for predictable experience
+            // Set inversion flags for vertical placement
+            m_vfingerInvertX = false;
+            m_vfingerInvertY = true;
             
-            // Calculate initial distance (70% of smaller dimension)
-            qreal initialDistance = qMin(frameSize.width(), frameSize.height()) * 0.7;
+            // Calculate distance percentages to try (70%, 50%, 40%)
+            qreal baseDistance = qMin(frameSize.width(), frameSize.height());
+            qreal distancePercentages[] = {0.7, 0.5, 0.4};
             
-            // For consistent placement, always place virtual finger vertically
-            // Choose direction based on which has more space
+            // Calculate available space vertically
             qreal distanceToTop = pos.y();
             qreal distanceToBottom = frameSize.height() - pos.y();
-            qreal distanceToLeft = pos.x();
-            qreal distanceToRight = frameSize.width() - pos.x();
+            bool placeAbove = (distanceToTop >= distanceToBottom);
+            qreal availableSpace = placeAbove ? distanceToTop : distanceToBottom;
             
             QPointF vfinger;
+            qreal finalDistance = 0;
+            bool placementFound = false;
             
-            // Determine best placement direction
-            if (m_vfingerInvertY && m_vfingerInvertX) {
-                // Both axes: use diagonal, prefer vertical if more space
-                if (qMin(distanceToTop, distanceToBottom) >= qMin(distanceToLeft, distanceToRight)) {
-                    // Place vertically (above or below)
-                    if (distanceToTop >= distanceToBottom) {
-                        // Place above
-                        vfinger = QPointF(pos.x(), pos.y() - initialDistance);
-                        m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
+            // Try different distance percentages until we find one that fits
+            for (int i = 0; i < 3 && !placementFound; i++) {
+                qreal testDistance = baseDistance * distancePercentages[i];
+                
+                if (testDistance <= availableSpace) {
+                    // Enough space, place virtual finger
+                    if (placeAbove) {
+                        vfinger = QPointF(pos.x(), pos.y() - testDistance);
+                        m_pinchCenter = QPointF(pos.x(), pos.y() - testDistance / 2.0);
                     } else {
-                        // Place below
-                        vfinger = QPointF(pos.x(), pos.y() + initialDistance);
-                        m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
+                        vfinger = QPointF(pos.x(), pos.y() + testDistance);
+                        m_pinchCenter = QPointF(pos.x(), pos.y() + testDistance / 2.0);
                     }
-                    // Only invert Y for pinch-to-zoom
-                    m_vfingerInvertX = false;
-                    m_vfingerInvertY = true;
-                } else {
-                    // Place horizontally (left or right)
-                    if (distanceToLeft >= distanceToRight) {
-                        // Place to the left
-                        vfinger = QPointF(pos.x() - initialDistance, pos.y());
-                        m_pinchCenter = QPointF(pos.x() - initialDistance / 2.0, pos.y());
-                    } else {
-                        // Place to the right
-                        vfinger = QPointF(pos.x() + initialDistance, pos.y());
-                        m_pinchCenter = QPointF(pos.x() + initialDistance / 2.0, pos.y());
-                    }
-                    // Only invert X
-                    m_vfingerInvertX = true;
-                    m_vfingerInvertY = false;
+                    finalDistance = testDistance;
+                    placementFound = true;
                 }
-            } else if (m_vfingerInvertY) {
-                // Vertical tilt: always place vertically
-                if (distanceToTop >= distanceToBottom) {
-                    // Place above
-                    vfinger = QPointF(pos.x(), pos.y() - initialDistance);
-                    m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
-                } else {
-                    // Place below
-                    vfinger = QPointF(pos.x(), pos.y() + initialDistance);
-                    m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
-                }
-            } else if (m_vfingerInvertX) {
-                // Horizontal tilt: always place horizontally
-                if (distanceToLeft >= distanceToRight) {
-                    // Place to the left
-                    vfinger = QPointF(pos.x() - initialDistance, pos.y());
-                    m_pinchCenter = QPointF(pos.x() - initialDistance / 2.0, pos.y());
-                } else {
-                    // Place to the right
-                    vfinger = QPointF(pos.x() + initialDistance, pos.y());
-                    m_pinchCenter = QPointF(pos.x() + initialDistance / 2.0, pos.y());
-                }
-            } else {
-                // Default: place vertically (pinch-to-zoom)
-                if (distanceToTop >= distanceToBottom) {
-                    // Place above
-                    vfinger = QPointF(pos.x(), pos.y() - initialDistance);
-                    m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
-                } else {
-                    // Place below
-                    vfinger = QPointF(pos.x(), pos.y() + initialDistance);
-                    m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
-                }
-                m_vfingerInvertX = false;
-                m_vfingerInvertY = true;
             }
             
-            // Clamp virtual finger to screen bounds
+            // If still no placement found (very edge case), use 80% of available space
+            if (!placementFound) {
+                finalDistance = qMax(availableSpace * 0.8, baseDistance * 0.2); // Use 80% of available or 20% minimum
+                if (placeAbove) {
+                    vfinger = QPointF(pos.x(), pos.y() - finalDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() - finalDistance / 2.0);
+                } else {
+                    vfinger = QPointF(pos.x(), pos.y() + finalDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() + finalDistance / 2.0);
+                }
+            }
+            
+            // Clamp virtual finger to screen bounds (safety check)
             vfinger = clampToScreen(vfinger, frameSize);
             
-            // If clamped, adjust center to midpoint
+            // If clamped, adjust center to midpoint (but keep mouse position fixed)
             if (vfinger.x() != pos.x() || vfinger.y() != pos.y()) {
+                // Recalculate center, but ensure mouse position stays fixed
                 m_pinchCenter = QPointF((pos.x() + vfinger.x()) / 2.0, (pos.y() + vfinger.y()) / 2.0);
             }
             
