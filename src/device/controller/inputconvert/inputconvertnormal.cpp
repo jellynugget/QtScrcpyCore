@@ -1,18 +1,89 @@
 #include <cmath>
 #include <QDebug>
+#include <QTimer>
 
 #include "inputconvertnormal.h"
 #include "controller.h"
 
-InputConvertNormal::InputConvertNormal(Controller *controller) : InputConvertBase(controller)
+InputConvertNormal::InputConvertNormal(Controller *controller) 
+    : InputConvertBase(controller)
+    , m_pinchState{ QSize(), QPoint(), QPoint(), QPoint(), QPoint(), 0, 0, 0, nullptr }
 {
+    m_pinchState.timer = new QTimer(this);
+    m_pinchState.timer->setSingleShot(true);
+    connect(m_pinchState.timer, &QTimer::timeout, this, &InputConvertNormal::onPinchGestureStep);
+    
+    // Initialize pinch-to-zoom state
     m_vfingerDown = false;
     m_vfingerInvertX = false;
     m_vfingerInvertY = false;
     m_pinchCenter = QPointF(0, 0);
 }
 
-InputConvertNormal::~InputConvertNormal() {}
+InputConvertNormal::~InputConvertNormal() 
+{
+    if (m_pinchState.timer && m_pinchState.timer->isActive()) {
+        m_pinchState.timer->stop();
+    }
+}
+
+void InputConvertNormal::onPinchGestureStep()
+{
+    const QSize &frameSize = m_pinchState.frameSize;
+    
+    switch (m_pinchState.step) {
+    case 1: {
+        // Send second DOWN
+        sendPinchTouchEvent(m_pinchState.touchId2, AMOTION_EVENT_ACTION_DOWN, 
+                           m_pinchState.startPoint2, frameSize, 1.0f);
+        // Step 2: Send MOVE events after 20ms
+        m_pinchState.step = 2;
+        m_pinchState.timer->start(20);
+        break;
+    }
+    case 2: {
+        // Send both MOVE events (both touches moving together)
+        sendPinchTouchEvent(m_pinchState.touchId1, AMOTION_EVENT_ACTION_MOVE, 
+                           m_pinchState.endPoint1, frameSize, 1.0f);
+        sendPinchTouchEvent(m_pinchState.touchId2, AMOTION_EVENT_ACTION_MOVE, 
+                           m_pinchState.endPoint2, frameSize, 1.0f);
+        // Step 3: Send UP events after 10ms
+        m_pinchState.step = 3;
+        m_pinchState.timer->start(10);
+        break;
+    }
+    case 3: {
+        // Send both UP events
+        sendPinchTouchEvent(m_pinchState.touchId2, AMOTION_EVENT_ACTION_UP, 
+                           m_pinchState.endPoint2, frameSize, 0.0f);
+        sendPinchTouchEvent(m_pinchState.touchId1, AMOTION_EVENT_ACTION_UP, 
+                           m_pinchState.endPoint1, frameSize, 0.0f);
+        // Gesture complete
+        m_pinchState.step = 0;
+        break;
+    }
+    default:
+        m_pinchState.step = 0;
+        break;
+    }
+}
+
+void InputConvertNormal::sendPinchTouchEvent(quint64 id, AndroidMotioneventAction action, 
+                                             QPoint pos, const QSize &frameSize, float pressure)
+{
+    ControlMsg *msg = new ControlMsg(ControlMsg::CMT_INJECT_TOUCH);
+    if (msg) {
+        msg->setInjectTouchMsgData(
+            id,
+            action,
+            static_cast<AndroidMotioneventButtons>(0),
+            static_cast<AndroidMotioneventButtons>(0),
+            QRect(pos, frameSize),
+            pressure);
+        sendControlMsg(msg);
+        qDebug() << "  -> Sent touch event: ID=" << id << " Action=" << action << " Pos=" << pos;
+    }
+}
 
 void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameSize, const QSize &showSize)
 {
@@ -81,8 +152,6 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
     // Handle pinch-to-zoom virtual finger
     if (change_vfinger) {
         if (down) {
-            // Store the initial pointer position as the zoom center
-            m_pinchCenter = pos;
             // Ctrl  Shift     invert_x  invert_y
             // ----  ----- ==> --------  --------
             //   0     0           0         0      -
@@ -91,23 +160,177 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
             //   1     1           0         1      horizontal tilt
             m_vfingerInvertX = ctrl_pressed ^ shift_pressed;
             m_vfingerInvertY = ctrl_pressed;
+            
+            // Calculate initial distance (70% of smaller dimension)
+            qreal initialDistance = qMin(frameSize.width(), frameSize.height()) * 0.7;
+            
+            // For consistent placement, always place virtual finger vertically
+            // Choose direction based on which has more space
+            qreal distanceToTop = pos.y();
+            qreal distanceToBottom = frameSize.height() - pos.y();
+            qreal distanceToLeft = pos.x();
+            qreal distanceToRight = frameSize.width() - pos.x();
+            
+            QPointF vfinger;
+            
+            // Determine best placement direction
+            if (m_vfingerInvertY && m_vfingerInvertX) {
+                // Both axes: use diagonal, prefer vertical if more space
+                if (qMin(distanceToTop, distanceToBottom) >= qMin(distanceToLeft, distanceToRight)) {
+                    // Place vertically (above or below)
+                    if (distanceToTop >= distanceToBottom) {
+                        // Place above
+                        vfinger = QPointF(pos.x(), pos.y() - initialDistance);
+                        m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
+                    } else {
+                        // Place below
+                        vfinger = QPointF(pos.x(), pos.y() + initialDistance);
+                        m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
+                    }
+                    // Only invert Y for pinch-to-zoom
+                    m_vfingerInvertX = false;
+                    m_vfingerInvertY = true;
+                } else {
+                    // Place horizontally (left or right)
+                    if (distanceToLeft >= distanceToRight) {
+                        // Place to the left
+                        vfinger = QPointF(pos.x() - initialDistance, pos.y());
+                        m_pinchCenter = QPointF(pos.x() - initialDistance / 2.0, pos.y());
+                    } else {
+                        // Place to the right
+                        vfinger = QPointF(pos.x() + initialDistance, pos.y());
+                        m_pinchCenter = QPointF(pos.x() + initialDistance / 2.0, pos.y());
+                    }
+                    // Only invert X
+                    m_vfingerInvertX = true;
+                    m_vfingerInvertY = false;
+                }
+            } else if (m_vfingerInvertY) {
+                // Vertical tilt: always place vertically
+                if (distanceToTop >= distanceToBottom) {
+                    // Place above
+                    vfinger = QPointF(pos.x(), pos.y() - initialDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
+                } else {
+                    // Place below
+                    vfinger = QPointF(pos.x(), pos.y() + initialDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
+                }
+            } else if (m_vfingerInvertX) {
+                // Horizontal tilt: always place horizontally
+                if (distanceToLeft >= distanceToRight) {
+                    // Place to the left
+                    vfinger = QPointF(pos.x() - initialDistance, pos.y());
+                    m_pinchCenter = QPointF(pos.x() - initialDistance / 2.0, pos.y());
+                } else {
+                    // Place to the right
+                    vfinger = QPointF(pos.x() + initialDistance, pos.y());
+                    m_pinchCenter = QPointF(pos.x() + initialDistance / 2.0, pos.y());
+                }
+            } else {
+                // Default: place vertically (pinch-to-zoom)
+                if (distanceToTop >= distanceToBottom) {
+                    // Place above
+                    vfinger = QPointF(pos.x(), pos.y() - initialDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() - initialDistance / 2.0);
+                } else {
+                    // Place below
+                    vfinger = QPointF(pos.x(), pos.y() + initialDistance);
+                    m_pinchCenter = QPointF(pos.x(), pos.y() + initialDistance / 2.0);
+                }
+                m_vfingerInvertX = false;
+                m_vfingerInvertY = true;
+            }
+            
+            // Clamp virtual finger to screen bounds
+            vfinger = clampToScreen(vfinger, frameSize);
+            
+            // If clamped, adjust center to midpoint
+            if (vfinger.x() != pos.x() || vfinger.y() != pos.y()) {
+                m_pinchCenter = QPointF((pos.x() + vfinger.x()) / 2.0, (pos.y() + vfinger.y()) / 2.0);
+            }
+            
+            AndroidMotioneventAction vfingerAction = AMOTION_EVENT_ACTION_DOWN;
+            simulateVirtualFinger(vfingerAction, vfinger, frameSize);
+            m_vfingerDown = down;
+        } else {
+            // Release virtual finger
+            QPointF vfinger;
+            if (m_vfingerInvertY && !m_vfingerInvertX) {
+                // Vertical placement: maintain same X, invert Y through center
+                vfinger = QPointF(pos.x(), 2.0 * m_pinchCenter.y() - pos.y());
+            } else if (m_vfingerInvertX && !m_vfingerInvertY) {
+                // Horizontal placement: maintain same Y, invert X through center
+                vfinger = QPointF(2.0 * m_pinchCenter.x() - pos.x(), pos.y());
+            } else {
+                // Both axes: use inverse point
+                vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
+            }
+            vfinger = clampToScreen(vfinger, frameSize);
+            AndroidMotioneventAction vfingerAction = AMOTION_EVENT_ACTION_UP;
+            simulateVirtualFinger(vfingerAction, vfinger, frameSize);
+            m_vfingerDown = down;
         }
-        QPointF vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
-        AndroidMotioneventAction vfingerAction = down ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-        simulateVirtualFinger(vfingerAction, vfinger, frameSize);
-        m_vfingerDown = down;
     } else if (m_vfingerDown && action == AMOTION_EVENT_ACTION_MOVE) {
-        // Update virtual finger position on move (using the initial pointer position as center)
-        QPointF vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
+        // Update virtual finger position on move
+        // Use the same placement logic: maintain distance and direction from initial setup
+        QPointF vfinger;
+        if (m_vfingerInvertY && !m_vfingerInvertX) {
+            // Vertical placement: maintain same X, invert Y through center
+            vfinger = QPointF(pos.x(), 2.0 * m_pinchCenter.y() - pos.y());
+        } else if (m_vfingerInvertX && !m_vfingerInvertY) {
+            // Horizontal placement: maintain same Y, invert X through center
+            vfinger = QPointF(2.0 * m_pinchCenter.x() - pos.x(), pos.y());
+        } else {
+            // Both axes: use inverse point
+            vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
+        }
+        // Clamp virtual finger to screen bounds to ensure it stays on screen
+        vfinger = clampToScreen(vfinger, frameSize);
         simulateVirtualFinger(AMOTION_EVENT_ACTION_MOVE, vfinger, frameSize);
     }
 }
 
 void InputConvertNormal::wheelEvent(const QWheelEvent *from, const QSize &frameSize, const QSize &showSize)
 {
-    if (!from || from->angleDelta().isNull()) {
+    qDebug() << "InputConvertNormal::wheelEvent called";
+    
+    if (!from) {
+        qDebug() << "  -> Event is null, returning";
         return;
     }
+
+    qDebug() << "  -> Modifiers:" << from->modifiers() << "ShiftModifier:" << Qt::ShiftModifier;
+    qDebug() << "  -> Has Shift:" << (from->modifiers() & Qt::ShiftModifier);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    qDebug() << "  -> AngleDelta:" << from->angleDelta();
+#else
+    qDebug() << "  -> Delta:" << from->delta();
+#endif
+
+    // Check if Shift is pressed for pinch-to-zoom gesture
+    // Allow pinch gesture even if delta is null (some systems may send null delta with Shift)
+    if (from->modifiers() & Qt::ShiftModifier) {
+        qDebug() << "  -> Shift detected, calling sendPinchGesture";
+        // For pinch gesture, we'll use a default delta if angleDelta is null
+        sendPinchGesture(from, frameSize, showSize);
+        return;
+    }
+
+    // For normal scroll, check if delta is null
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    if (from->angleDelta().isNull()) {
+        qDebug() << "  -> AngleDelta is null, returning";
+        return;
+    }
+#else
+    if (from->delta() == 0) {
+        qDebug() << "  -> Delta is zero, returning";
+        return;
+    }
+#endif
+    
+    qDebug() << "  -> No Shift, processing normal scroll";
 
     // delta
     float hScroll = from->angleDelta().x() / 64.0f;
@@ -175,6 +398,134 @@ void InputConvertNormal::keyEvent(const QKeyEvent *from, const QSize &frameSize,
 
     controlMsg->setInjectKeycodeMsgData(action, keyCode, m_repeat, convertMetastate(from->modifiers()));
     sendControlMsg(controlMsg);
+}
+
+void InputConvertNormal::sendPinchGesture(const QWheelEvent *from, const QSize &frameSize, const QSize &showSize)
+{
+    qDebug() << "sendPinchGesture called - Shift+scroll detected";
+    
+    // Get mouse position and convert to frame coordinates
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    QPointF pos = from->position();
+#else
+    QPointF pos = from->posF();
+#endif
+    pos.setX(pos.x() * frameSize.width() / showSize.width());
+    pos.setY(pos.y() * frameSize.height() / showSize.height());
+    
+    qDebug() << "Mouse pos (frame coords):" << pos << "Frame size:" << frameSize;
+
+    // Calculate scroll delta to determine zoom direction
+    float scrollDelta = 0.0f;
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    if (!from->angleDelta().isNull()) {
+        scrollDelta = from->angleDelta().y() / 120.0f; // Normalize scroll delta
+    } else if (!from->pixelDelta().isNull()) {
+        // Fallback to pixelDelta if angleDelta is null
+        scrollDelta = from->pixelDelta().y() / 10.0f; // Approximate conversion
+    } else {
+        // If both are null, use a default small zoom
+        scrollDelta = 1.0f; // Default zoom in
+        qDebug() << "  -> Both angleDelta and pixelDelta are null, using default zoom";
+    }
+#else
+    if (from->delta() != 0) {
+        scrollDelta = from->delta() / 120.0f;
+    } else {
+        // If delta is zero, use a default small zoom
+        scrollDelta = 1.0f; // Default zoom in
+        qDebug() << "  -> Delta is zero, using default zoom";
+    }
+#endif
+    
+    qDebug() << "  -> Calculated scrollDelta:" << scrollDelta;
+
+    // scrcpy's approach: virtual finger positioned symmetrically opposite through screen center
+    // Screen center in frame coordinates
+    QPointF screenCenter(frameSize.width() / 2.0f, frameSize.height() / 2.0f);
+    
+    // Calculate virtual finger position (symmetric through center)
+    // Vx = Cx - (Mx - Cx) = 2*Cx - Mx
+    // Vy = Cy - (My - Cy) = 2*Cy - My
+    QPointF virtualPos = 2.0f * screenCenter - pos;
+    
+    // For pinch gesture: zoom in = fingers move closer, zoom out = fingers move farther
+    // Calculate initial distance between the two points
+    QPointF initialVector = virtualPos - pos;
+    float initialDistance = std::sqrt(initialVector.x() * initialVector.x() + initialVector.y() * initialVector.y());
+    
+    // Distance change based on scroll (positive = zoom in = closer, negative = zoom out = farther)
+    // Make the gesture much more pronounced - Android needs a significant distance change
+    // Use at least 50% change to ensure Android recognizes it as a pinch gesture
+    float minChange = initialDistance * 0.5f;
+    float maxChange = initialDistance * 0.8f;
+    
+    // Calculate desired change based on scroll delta
+    float desiredChange = scrollDelta * initialDistance * 0.4f;
+    
+    // Ensure minimum gesture size - always use at least 50% of initial distance
+    if (qAbs(desiredChange) < minChange) {
+        desiredChange = desiredChange >= 0 ? minChange : -minChange;
+    }
+    
+    // Cap at maximum
+    float distanceChange = qBound(-maxChange, desiredChange, maxChange);
+    float finalDistance = initialDistance - distanceChange;
+    
+    qDebug() << "  -> Initial distance:" << initialDistance << "Change:" << distanceChange << "Final distance:" << finalDistance;
+    qDebug() << "  -> Distance change percentage:" << (distanceChange / initialDistance * 100.0f) << "%";
+    
+    // Calculate unit vector from pos to virtualPos
+    QPointF unitVector = initialDistance > 0.01f ? initialVector / initialDistance : QPointF(1, 0);
+    
+    // Start positions (current mouse and virtual positions)
+    QPointF startPoint1 = pos;
+    QPointF startPoint2 = virtualPos;
+    
+    // End positions: maintain center point, adjust distance
+    QPointF centerPoint = (pos + virtualPos) / 2.0f;
+    QPointF endPoint1 = centerPoint - unitVector * (finalDistance / 2.0f);
+    QPointF endPoint2 = centerPoint + unitVector * (finalDistance / 2.0f);
+    
+    // Clamp points to frame bounds
+    startPoint1.setX(qBound(0.0, startPoint1.x(), static_cast<qreal>(frameSize.width())));
+    startPoint1.setY(qBound(0.0, startPoint1.y(), static_cast<qreal>(frameSize.height())));
+    startPoint2.setX(qBound(0.0, startPoint2.x(), static_cast<qreal>(frameSize.width())));
+    startPoint2.setY(qBound(0.0, startPoint2.y(), static_cast<qreal>(frameSize.height())));
+    endPoint1.setX(qBound(0.0, endPoint1.x(), static_cast<qreal>(frameSize.width())));
+    endPoint1.setY(qBound(0.0, endPoint1.y(), static_cast<qreal>(frameSize.height())));
+    endPoint2.setX(qBound(0.0, endPoint2.x(), static_cast<qreal>(frameSize.width())));
+    endPoint2.setY(qBound(0.0, endPoint2.y(), static_cast<qreal>(frameSize.height())));
+
+    // Use numeric touch IDs (0 and 1) as per controlmsg.h comment: "id 代表一个触摸点，最多支持10个触摸点[0,9]"
+    const quint64 touchId1 = 0;
+    const quint64 touchId2 = 1;
+
+    qDebug() << "Pinch gesture - Point1:" << startPoint1 << "Point2:" << startPoint2;
+    qDebug() << "End positions - Point1:" << endPoint1 << "Point2:" << endPoint2;
+    qDebug() << "Touch IDs:" << touchId1 << touchId2;
+
+    // Stop any existing pinch gesture
+    if (m_pinchState.timer && m_pinchState.timer->isActive()) {
+        m_pinchState.timer->stop();
+    }
+
+    // Store gesture state for timer-based sending
+    m_pinchState.frameSize = frameSize;
+    m_pinchState.startPoint1 = startPoint1.toPoint();
+    m_pinchState.startPoint2 = startPoint2.toPoint();
+    m_pinchState.endPoint1 = endPoint1.toPoint();
+    m_pinchState.endPoint2 = endPoint2.toPoint();
+    m_pinchState.touchId1 = touchId1;
+    m_pinchState.touchId2 = touchId2;
+    m_pinchState.step = 0;
+
+    // Step 0: Send first DOWN immediately
+    sendPinchTouchEvent(touchId1, AMOTION_EVENT_ACTION_DOWN, m_pinchState.startPoint1, frameSize, 1.0f);
+    
+    // Step 1: Send second DOWN after 10ms (so Android sees both as simultaneous)
+    m_pinchState.step = 1;
+    m_pinchState.timer->start(10);
 }
 
 AndroidMotioneventButtons InputConvertNormal::convertMouseButtons(Qt::MouseButtons buttonState)
@@ -526,4 +877,13 @@ QPointF InputConvertNormal::inversePoint(const QPointF &point, const QPointF &ce
         result.setY(2.0 * center.y() - point.y());
     }
     return result;
+}
+
+QPointF InputConvertNormal::clampToScreen(const QPointF &point, const QSize &frameSize)
+{
+    // Clamp the point to stay within screen bounds
+    QPointF clamped = point;
+    clamped.setX(qBound(0.0, point.x(), static_cast<qreal>(frameSize.width() - 1)));
+    clamped.setY(qBound(0.0, point.y(), static_cast<qreal>(frameSize.height() - 1)));
+    return clamped;
 }
