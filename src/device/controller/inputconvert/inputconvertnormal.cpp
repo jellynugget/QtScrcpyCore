@@ -9,6 +9,7 @@ InputConvertNormal::InputConvertNormal(Controller *controller) : InputConvertBas
     m_vfingerDown = false;
     m_vfingerInvertX = false;
     m_vfingerInvertY = false;
+    m_pinchCenter = QPointF(0, 0);
 }
 
 InputConvertNormal::~InputConvertNormal() {}
@@ -80,6 +81,8 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
     // Handle pinch-to-zoom virtual finger
     if (change_vfinger) {
         if (down) {
+            // Store the initial pointer position as the zoom center
+            m_pinchCenter = pos;
             // Ctrl  Shift     invert_x  invert_y
             // ----  ----- ==> --------  --------
             //   0     0           0         0      -
@@ -89,13 +92,13 @@ void InputConvertNormal::mouseEvent(const QMouseEvent *from, const QSize &frameS
             m_vfingerInvertX = ctrl_pressed ^ shift_pressed;
             m_vfingerInvertY = ctrl_pressed;
         }
-        QPointF vfinger = inversePoint(pos, frameSize, m_vfingerInvertX, m_vfingerInvertY);
+        QPointF vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
         AndroidMotioneventAction vfingerAction = down ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
         simulateVirtualFinger(vfingerAction, vfinger, frameSize);
         m_vfingerDown = down;
     } else if (m_vfingerDown && action == AMOTION_EVENT_ACTION_MOVE) {
-        // Update virtual finger position on move
-        QPointF vfinger = inversePoint(pos, frameSize, m_vfingerInvertX, m_vfingerInvertY);
+        // Update virtual finger position on move (using the initial pointer position as center)
+        QPointF vfinger = inversePoint(pos, m_pinchCenter, m_vfingerInvertX, m_vfingerInvertY);
         simulateVirtualFinger(AMOTION_EVENT_ACTION_MOVE, vfinger, frameSize);
     }
 }
@@ -512,14 +515,15 @@ void InputConvertNormal::simulateVirtualFinger(AndroidMotioneventAction action, 
     sendControlMsg(controlMsg);
 }
 
-QPointF InputConvertNormal::inversePoint(const QPointF &point, const QSize &frameSize, bool invertX, bool invertY)
+QPointF InputConvertNormal::inversePoint(const QPointF &point, const QPointF &center, bool invertX, bool invertY)
 {
+    // Invert point through the center: P' = 2*C - P
     QPointF result = point;
     if (invertX) {
-        result.setX(frameSize.width() - point.x());
+        result.setX(2.0 * center.x() - point.x());
     }
     if (invertY) {
-        result.setY(frameSize.height() - point.y());
+        result.setY(2.0 * center.y() - point.y());
     }
     return result;
 }

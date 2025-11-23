@@ -22,11 +22,12 @@ private:
     
     // Pinch-to-zoom support
     void simulateVirtualFinger(AndroidMotioneventAction action, const QPointF &point, const QSize &frameSize);
-    QPointF inversePoint(const QPointF &point, const QSize &frameSize, bool invertX, bool invertY);
+    QPointF inversePoint(const QPointF &point, const QPointF &center, bool invertX, bool invertY);
     
     bool m_vfingerDown = false;
     bool m_vfingerInvertX = false;
     bool m_vfingerInvertY = false;
+    QPointF m_pinchCenter; // Center point for pinch-to-zoom (initial pointer position)
 };
 
 #endif // INPUTCONVERT_H
