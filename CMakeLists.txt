@@ -57,6 +57,8 @@ set(QSC_ADB_SOURCES
     src/adb/adbprocessimpl.h
     src/adb/adbprocessimpl.cpp
     src/adb/adbprocess.cpp
+    src/adb/adbdevicemonitor.h
+    src/adb/adbdevicemonitor.cpp
 )
 source_group(src/adb FILES ${QSC_ADB_SOURCES})
 
@@ -72,6 +74,7 @@ set(QSC_INCLUDE_SOURCES
     include/QtScrcpyCoreDef.h
     include/adbprocess.h
     include/IDecoder.h
+    src/adb/adbdevicemonitor.h
 )
 source_group(include FILES ${QSC_INCLUDE_SOURCES})
 
